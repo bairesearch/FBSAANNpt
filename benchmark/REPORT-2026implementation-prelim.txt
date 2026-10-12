@@ -1,3 +1,12 @@
+benchmark_output=../../benchmarks/REPORT-2026implementation-prelim-seed42
+mkdir -p "$benchmark_output"/{source,data,runs,logs}
+cp ANNpt_*.py FBSAANNpt_FBSAANN*.py "$benchmark_output/source/"
+python -B benchmark_fbsaann.py suite \
+  --output "$benchmark_output" \
+  --seed 42 \
+  --threads 2 \
+  --jobs 2
+  
 FBSA / BACKPROP BENCHMARK
 
 Configured per-dataset architecture, learning rate, repeats and epochs; paired initialization and minibatches.

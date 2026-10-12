@@ -32,6 +32,26 @@ else:
 	trainLocal = False	#default: False #disabled for debug/benchmark against standard full layer backprop
 	#standard backprop - backward connections not used
 
+fbsaOptimiseTrainingIterations = False	#default: True	#orig: False
+if(fbsaOptimiseTrainingIterations):
+	#LREANN convergence policy: replaces fixed epochs and the epoch LR scheduler.
+	#True selects/stops on full training loss; False uses a separate validation set.
+	trainSetLossOptimisation = False	#default: False
+	fbsaValidationSplitSize = 0.2	#fraction of training rows held out before preprocessing/repetition
+	fbsaValidationSplitSeed = 20260930
+	fbsaEvaluateEveryIterations = 100
+	fbsaMinimumTrainingIterations = 2000	#also require at least one complete training pass
+	fbsaTrainingPatience = 2000	#iterations without significant loss improvement
+	fbsaTrainingMinDelta = 0.0001
+	fbsaTrainingRelativeMinDelta = 0.001
+	fbsaTrainingLossGoal = 0.01	#training-loss mode only; also requires 100% train accuracy
+	fbsaValidationPatience = 2000
+	fbsaValidationMinDelta = 0.0001
+	fbsaValidationRelativeMinDelta = 0.001
+	fbsaTrainingLearningRateFactor = 0.2
+	fbsaTrainingLearningRateReductions = 3
+	fbsaTrainingMaxNumericalRecoveries = 5
+
 #Self-Assembling Learning (SAL/SAM), PNAS 2026, symmetric-V/Vbar update.
 #Reference: liaoq/SAM2026/run_netv_compare_with_bp.py, REPRO defaults and
 #update_layer_gradients_combined_norm_nl (equivalent to "reference" for these settings).

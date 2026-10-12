@@ -1,0 +1,10 @@
+benchmark_output=../../benchmarks/REPORT-2026implementation-convergence-seed42
+mkdir -p "$benchmark_output"/{source,data,runs,logs}
+cp ANNpt_*.py FBSAANNpt_FBSAANN*.py "$benchmark_output/source/"
+python -B benchmark_fbsaann.py suite \
+  --output "$benchmark_output" \
+  --seed 42 \
+  --threads 2 \
+  --jobs 2 \
+  --optimise-training-iterations \
+  --no-train-set-loss-optimisation

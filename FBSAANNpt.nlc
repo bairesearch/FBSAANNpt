@@ -2,6 +2,14 @@
 Codex App GPT-6.0:
 
 ---
+upgrade the FBSAANN code to support option fbsaOptimiseTrainingIterations=True (based on LREANNpt option populationPertubationOptimiseTrainingIterations). Ensure to support both trainSetLossOptimisation = True and False (ie use validation set for training iterations optimisation).
+	see the LREANNpt repo code for reference
+	Please try and use the same LREANNpt populationPertubationOptimiseTrainingIterations code if possible.
+upgrade your benchmark code to support option fbsaOptimiseTrainingIterations=True
+	It may be simple to upgrade the benchmark_fbsaann.py to execute the FBSA codebase using optionfbsaOptimiseTrainingIterations=True instead of optionfbsaOptimiseTrainingIterations=False.
+	For reference, LREANNpt used independent benchmark code to implement its option populationPertubationOptimiseTrainingIterations. An independent benchmark implementation should not be required however.
+
+---
 upgrade your implementation according to the latest PNAS 2006 version; 
 https://chatgpt.com/share/6acc76d0-fb70-83ec-92c5-68ba97993273
 Latest implementation (PNAS 2026):

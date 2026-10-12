@@ -138,6 +138,18 @@ def print_gpu_utilization():
 		printf(f"  Temperature: {gpu.temperature} C\n")
 
 def processDataset(trainOrTest, dataset, model, validationDataset=None):
+	if(useAlgorithmFBSAANN and fbsaOptimiseTrainingIterations):
+		import FBSAANNpt_FBSAANN_trainingConvergence as convergence
+		model.to(device)
+		if(trainOrTest):
+			optim = ANNpt_algorithm.createOptimiser(model) if trainLocal else createOptimiser(model)
+			result = convergence.trainFBSAUntilConverged(dataset, validationDataset, model, ANNpt_algorithm, optim)
+			if(saveModelTrain):
+				saveModel(model)
+		else:
+			result = convergence.evaluateFBSADataset(dataset, model)
+		print(("train" if trainOrTest else "test") + " convergence result = ", result)
+		return result
 	if(useAlgorithmSUANN):
 		if(useStochasticUpdates):
 			if(usePopulationPertubation):

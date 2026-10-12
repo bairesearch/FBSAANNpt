@@ -2,7 +2,8 @@
 """Full configured tabular benchmark through the shared ANNpt wrapper.
 
 Dataset and algorithm switches are evaluated in memory; repository wrappers are
-never edited. Train with the configured epochs/repeats/batches. Test uses every
+never edited. Train with configured epochs or the production FBSA convergence
+controller, for both FBSA and backprop. Test uses every
 held-out row and reports sample-weighted accuracy, not an average of batches.
 Preparation downloads the UCI HIGGS and New Thyroid inputs and prepends their
 CSV headers under OUTPUT/raw (or --raw-data-dir), reusing completed files.
@@ -29,6 +30,14 @@ DATASETS = ['iris', 'new-thyroid', 'breast-cancer-wisconsin', 'red-wine', 'titan
             'diabetes-readmission', 'blog-feedback', 'covertype', 'topquark', 'higgs']
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = ROOT / 'benchmarks/2026-10-12-seed42'
+CONVERGENCE_SETTINGS = [
+    'trainSetLossOptimisation', 'fbsaValidationSplitSize', 'fbsaValidationSplitSeed',
+    'fbsaEvaluateEveryIterations', 'fbsaMinimumTrainingIterations',
+    'fbsaTrainingPatience', 'fbsaTrainingMinDelta', 'fbsaTrainingRelativeMinDelta',
+    'fbsaTrainingLossGoal', 'fbsaValidationPatience', 'fbsaValidationMinDelta',
+    'fbsaValidationRelativeMinDelta', 'fbsaTrainingLearningRateFactor',
+    'fbsaTrainingLearningRateReductions', 'fbsaTrainingMaxNumericalRecoveries',
+]
 LOCAL_DATASETS = {
     #https://archive.ics.uci.edu/dataset/280/higgs
     'higgs': {
@@ -124,6 +133,47 @@ def sha_file(path):
     return digest.hexdigest()
 
 
+def load_algorithm_config(args):
+    """Apply optional switches before the source's conditional settings execute."""
+    path = args.output / 'source' / 'FBSAANNpt_FBSAANN_globalDefs.py'
+    text = path.read_text()
+    overrides = {'useFBSA': args.method == 'fbsa',
+                 'fbsaOptimiseTrainingIterations': getattr(args, 'optimise_training_iterations', None),
+                 'trainSetLossOptimisation': getattr(args, 'train_set_loss_optimisation', None)}
+    for name, value in overrides.items():
+        if value is None:
+            continue
+        text, count = re.subn(r'(?m)^([ \t]*)' + name + r' = .*$',
+                             lambda match: match[1] + name + ' = ' + str(value), text)
+        if count != 1:
+            raise ValueError(f'Cannot configure {name}; create a current source snapshot')
+    config = types.ModuleType('FBSAANNpt_FBSAANN_globalDefs')
+    exec(compile(text, str(path), 'exec'), vars(config))
+    return config
+
+
+def iteration_settings(config):
+    values = config if isinstance(config, dict) else vars(config)
+    enabled = values.get('fbsaOptimiseTrainingIterations', False)
+    result = {'fbsaOptimiseTrainingIterations': enabled}
+    if enabled:
+        result.update({name: values[name] for name in CONVERGENCE_SETTINGS})
+    return result
+
+
+def source_hashes(args):
+    return {p.name: sha_file(p) for p in (args.output / 'source').glob('*.py')}
+
+
+def validate_saved_artifact(record, args):
+    """A new loss mode needs freshly prepared data and independently saved runs."""
+    expected = iteration_settings(load_algorithm_config(args))
+    if (record['seed'] != args.seed or record['source_hashes'] != source_hashes(args)
+            or iteration_settings(record['settings']) != expected):
+        raise ValueError('Saved data/run uses a different seed, source snapshot or convergence policy; '
+                         'use a separate output directory')
+
+
 def setup(args):
     cache = args.output / 'cache'
     os.environ.update(HF_HOME=str(cache / 'huggingface'),
@@ -139,11 +189,7 @@ def setup(args):
     torch.manual_seed(args.seed)
     source = args.output / 'source'
     sys.path.insert(0, str(source))
-    config = types.ModuleType('FBSAANNpt_FBSAANN_globalDefs')
-    text = (source / (config.__name__ + '.py')).read_text()
-    text, count = re.subn(r'(?m)^useFBSA = True.*$', 'useFBSA = ' + str(args.method == 'fbsa'), text)
-    assert count == 1
-    exec(compile(text, str(source / (config.__name__ + '.py')), 'exec'), vars(config))
+    config = load_algorithm_config(args)
     sys.modules[config.__name__] = config
     definitions = types.ModuleType('ANNpt_globalDefs')
     text = (source / 'ANNpt_globalDefs.py').read_text()
@@ -167,7 +213,8 @@ def settings(definitions):
              'fbsaWeightDecay', 'fbsaWeightDecayV', 'fbsaWeightDecayVBar', 'fbsaMomentum',
              'fbsaImplementation', 'fbsaReferenceCommit', 'activationFunctionTypeForward',
              'activationFunctionTypeBackward', 'trainLocal', 'useFBSA']
-    return {name: getattr(definitions, name) for name in names if hasattr(definitions, name)}
+    return {**{name: getattr(definitions, name) for name in names if hasattr(definitions, name)},
+            **iteration_settings(definitions)}
 
 
 def prepare(args):
@@ -214,7 +261,7 @@ def prepare(args):
             'field_types': wrapper.ANNpt_data.createFieldTypeList(dataset['train']),
             'settings': settings(definitions), 'elapsed_seconds': time.time() - started,
             'source_adapter': source_adapter,
-            'source_hashes': {p.name: sha_file(p) for p in (args.output / 'source').glob('*.py')}}
+            'source_hashes': source_hashes(args)}
     atomic_json(data_path / 'benchmark.json', info)
     print('PREPARED ' + json.dumps(info), flush=True)
 
@@ -249,8 +296,7 @@ def run(args):
     from datasets import load_from_disk
     data_path = args.output / 'data' / args.dataset
     info = json.loads((data_path / 'benchmark.json').read_text())
-    for name, expected in info['source_hashes'].items():
-        assert sha_file(args.output / 'source' / name) == expected
+    validate_saved_artifact(info, args)
     dataset = load_from_disk(str(data_path))
     data_module = wrapper.ANNpt_data
     data_module._cachedFeatureTypeList = info['field_types'][:-1]
@@ -266,20 +312,29 @@ def run(args):
     status_path = args.output / 'runs' / f'{args.dataset}_{args.method}.progress.json'
     wrapper.tqdm = lambda iterable, **kwargs: Progress(iterable, status_path, **kwargs)
     schedule = hashlib.sha256()
-    original_train = wrapper.trainBatch
+    schedule_checkpoints = {'0': schedule.hexdigest()}
+    optimise = getattr(definitions, 'fbsaOptimiseTrainingIterations', False)
+    original_propagate = wrapper.ANNpt_algorithm.trainOrTestModel
     steps = 0
-    def observed_train(batch_index, batch, *rest, **kwargs):
+    def observed_propagate(model, train_or_test, x, y, *rest, **kwargs):
         nonlocal steps
-        for array in batch:
-            schedule.update(array.numpy().tobytes())
-        loss, accuracy = original_train(batch_index, batch, *rest, **kwargs)
-        if not np.isfinite(loss):
+        if train_or_test:
+            for array in (x, y):
+                schedule.update(array.detach().cpu().numpy().tobytes())
+            #Count attempted updates, including production numerical recoveries.
+            steps += 1
+            if optimise and steps % definitions.fbsaEvaluateEveryIterations == 0:
+                schedule_checkpoints[str(steps)] = schedule.hexdigest()
+                atomic_json(status_path, {'status': 'training', 'training_steps': steps,
+                                         'selection_metric': 'train_loss' if definitions.trainSetLossOptimisation else 'validation_loss',
+                                         'time': time.time()})
+        loss, accuracy = original_propagate(model, train_or_test, x, y, *rest, **kwargs)
+        if train_or_test and not optimise and not np.isfinite(float(loss.detach())):
             raise FloatingPointError(f'Non-finite training loss at update {steps}')
-        steps += 1
         return loss, accuracy
-    wrapper.trainBatch = observed_train
+    wrapper.ANNpt_algorithm.trainOrTestModel = observed_propagate
     started = time.time()
-    wrapper.processDataset(True, dataset['train'], model)
+    convergence_result = wrapper.processDataset(True, dataset['train'], model, dataset.get('validation'))
     trained = time.time()
     #The existing loader defaults to drop_last=True, including during testing.
     #Keep its training behavior, but include the last partial test batch.
@@ -298,28 +353,93 @@ def run(args):
         totals['loss_sum'] += loss * len(labels)
         return loss, accuracy
     wrapper.testBatch = observed_test
-    wrapper.processDataset(False, dataset['test'], model)
-    assert totals['rows'] == len(dataset['test'])
+    test_result = wrapper.processDataset(False, dataset['test'], model)
+    if optimise:
+        assert convergence_result['iterations'] == steps
+        assert np.isfinite(test_result['loss']) and np.isfinite(test_result['accuracy'])
+    else:
+        test_result = dict(rows=totals['rows'], accuracy=totals['correct'] / totals['rows'],
+                           loss=totals['loss_sum'] / totals['rows'])
+    assert test_result['rows'] == len(dataset['test'])
     repeat = definitions.datasetRepeatSize if definitions.datasetRepeat else 1
     result = {'dataset': args.dataset, 'method': args.method, 'seed': args.seed,
-              'status': 'completed', 'test_accuracy': totals['correct'] / totals['rows'],
-              'test_loss': totals['loss_sum'] / totals['rows'], 'test_rows_evaluated': totals['rows'],
+              'status': 'completed', 'test_accuracy': test_result['accuracy'],
+              'test_loss': test_result['loss'], 'test_rows_evaluated': test_result['rows'],
               'test_unique_rows': len(dataset['test']) // repeat,
               'training_steps': steps, 'training_seconds': trained - started,
               'test_seconds': time.time() - trained, 'settings': settings(definitions),
               'data_fingerprints': info['fingerprints'], 'initial_forward_sha256': initial_hash,
               'minibatch_schedule_sha256': schedule.hexdigest(), 'device': str(definitions.device),
               'torch_version': torch.__version__, 'source_hashes': info['source_hashes']}
+    if optimise:
+        result['training_convergence'] = convergence_result
+        result['minibatch_schedule_checkpoints'] = schedule_checkpoints
     atomic_json(args.output / 'runs' / f'{args.dataset}_{args.method}.json', result)
+    if optimise:
+        atomic_json(status_path, {'status': 'completed', 'training_steps': steps,
+                                 'selected_iteration': convergence_result['selected_iteration'],
+                                 'stop_reason': convergence_result['stop_reason'], 'time': time.time()})
     print('RESULT ' + json.dumps(result), flush=True)
+
+
+def verify_pair(dataset, entry, info):
+    backprop, fbsa = entry['backprop'], entry['fbsa']
+    for key in ('seed', 'data_fingerprints', 'initial_forward_sha256', 'source_hashes'):
+        assert backprop[key] == fbsa[key], (dataset, key)
+    policy = iteration_settings(backprop['settings'])
+    assert policy == iteration_settings(fbsa['settings']) == iteration_settings(info['settings']), dataset
+    optimise = policy['fbsaOptimiseTrainingIterations']
+    for result in (backprop, fbsa):
+        config = result['settings']
+        assert result['seed'] == info['seed'], dataset
+        assert result['test_rows_evaluated'] == info['sizes']['test'], dataset
+        assert result['source_hashes'] == info['source_hashes'], dataset
+        assert result['data_fingerprints'] == info['fingerprints'], dataset
+        batches, remainder = divmod(info['sizes']['train'], config['batchSize'])
+        if remainder and (optimise or not config['dataloaderMaintainBatchSize']):
+            batches += 1
+        if optimise:
+            selected = result['training_convergence']
+            split = 'train' if policy['trainSetLossOptimisation'] else 'validation'
+            assert result['training_steps'] == selected['iterations'], dataset
+            assert selected['iterations'] >= selected['policy']['minimum_updates'] == max(
+                batches, policy['fbsaMinimumTrainingIterations']), dataset
+            assert 0 <= selected['selected_iteration'] <= selected['iterations'], dataset
+            assert selected['selected_iteration'] % policy['fbsaEvaluateEveryIterations'] == 0, dataset
+            assert selected['policy']['selection_metric'] == split + '_loss', dataset
+            assert selected['train']['rows'] == info['sizes']['train'], dataset
+            if split == 'validation':
+                assert selected['validation']['rows'] == info['sizes']['validation'], dataset
+            else:
+                assert selected['validation'] is None, dataset
+            if selected['stop_reason'] == 'perfect_train_fit':
+                #The selected minimum-loss checkpoint can precede the perfect-fit observation.
+                assert split == 'train', dataset
+                assert selected['train']['loss'] <= policy['fbsaTrainingLossGoal'], dataset
+            else:
+                label = 'training' if split == 'train' else 'validation'
+                assert selected['stop_reason'] == label + '_loss_plateau_after_lr_reductions', dataset
+            assert result['minibatch_schedule_checkpoints'][str(selected['iterations'])] == result['minibatch_schedule_sha256'], dataset
+        else:
+            assert result['training_steps'] == batches * config['trainNumberOfEpochs'], dataset
+    if optimise:
+        assert backprop['training_convergence']['policy'] == fbsa['training_convergence']['policy'], dataset
+        shorter, longer = sorted((backprop, fbsa), key=lambda result: result['training_steps'])
+        for step, digest in shorter['minibatch_schedule_checkpoints'].items():
+            assert longer['minibatch_schedule_checkpoints'].get(step) == digest, (dataset, 'minibatch prefix', step)
+    else:
+        for key in ('training_steps', 'minibatch_schedule_sha256'):
+            assert backprop[key] == fbsa[key], (dataset, key)
 
 
 def report(args):
     rows = []
     verified = []
     implementations = set()
+    iteration_rows = []
     lines = ['FBSA / BACKPROP BENCHMARK', '',
-             'Configured per-dataset architecture, learning rate, repeats and epochs; paired initialization and minibatches.',
+             'Configured per-dataset architecture, learning rate and repeats; paired initialization and minibatch order.',
+             'Training uses configured epochs or the production convergence controller; selection details below.',
              'Backprop: existing Adam optimizer. FBSA: local SAL updates with SGD; version/settings listed below.',
              'All held-out rows evaluated, including final partial batches. No tuning on the test set.', '',
              'Dataset | Backprop test accuracy (%) | FBSA test accuracy (%) | FBSA minus backprop (pp)']
@@ -328,6 +448,15 @@ def report(args):
         for method in ['backprop', 'fbsa']:
             path = args.output / 'runs' / f'{dataset}_{method}.json'
             entry[method] = json.loads(path.read_text()) if path.exists() else None
+            result = entry[method]
+            if result and result.get('status') == 'completed':
+                if result['settings'].get('fbsaOptimiseTrainingIterations', False):
+                    selected = result['training_convergence']
+                    mode = selected['policy']['selection_metric']
+                    iteration_rows.append(f"{dataset} | {method} | {mode} | {result['training_steps']} | "
+                                          f"{selected['selected_iteration']} | {selected['stop_reason']}")
+                else:
+                    iteration_rows.append(f"{dataset} | {method} | fixed epochs | {result['training_steps']} | — | configured epochs")
         if entry['fbsa'] and entry['fbsa'].get('status') == 'completed':
             config = entry['fbsa']['settings']
             version = config.get('fbsaImplementation', 'preprint-based SAL (legacy)')
@@ -342,18 +471,8 @@ def report(args):
                 f"decay W/Wprime={decay}, V={decay_v}, Vbar={decay_vbar}; "
                 f"gradient factors={json.dumps(config['fbsaLearningRateFactors'], sort_keys=True)}")
         if all(entry[m] and entry[m].get('status') == 'completed' for m in ['backprop', 'fbsa']):
-            for key in ['data_fingerprints', 'initial_forward_sha256', 'minibatch_schedule_sha256', 'training_steps', 'source_hashes']:
-                assert entry['backprop'][key] == entry['fbsa'][key], (dataset, key)
             info = json.loads((args.output / 'data' / dataset / 'benchmark.json').read_text())
-            for method in ['backprop', 'fbsa']:
-                result = entry[method]
-                config = result['settings']
-                batches, remainder = divmod(info['sizes']['train'], config['batchSize'])
-                if remainder and not config['dataloaderMaintainBatchSize']:
-                    batches += 1
-                assert result['training_steps'] == batches * config['trainNumberOfEpochs'], dataset
-                assert result['test_rows_evaluated'] == info['sizes']['test'], dataset
-                assert result['source_hashes'] == info['source_hashes'], dataset
+            verify_pair(dataset, entry, info)
             verified.append(dataset)
             a, b = [100 * entry[m]['test_accuracy'] for m in ['backprop', 'fbsa']]
             lines.append(f'{dataset} | {a:.4f} | {b:.4f} | {b-a:+.4f}')
@@ -366,9 +485,14 @@ def report(args):
         rows.append(entry)
     if implementations:
         lines.extend(['', 'FBSA implementations in completed runs:'] + sorted(implementations))
+    if iteration_rows:
+        lines.extend(['', 'Training iteration selection:',
+                      'Dataset | Method | Selection | Total iterations | Selected iteration | Stop reason'] + iteration_rows)
     lines.extend(['', f'Verified complete paired runs: {len(verified)}/{len(DATASETS)} datasets.',
-                  'Checks: identical prepared data, initial forward weights, minibatch sequence and source code;',
-                  'configured training-update counts and complete test-set coverage for both methods.', '',
+                  'Checks: identical prepared data, initial forward weights, source code and selection policy;',
+                  'matching minibatch prefixes through the shorter run, and complete test-set coverage.',
+                  'Fixed-epoch pairs also require identical update counts and complete minibatch schedules.',
+                  'Convergence pairs may stop independently; selected iterations and stop reasons are checked.', '',
                   'Interpretation: one paired seed, without hyperparameter tuning or confidence intervals.',
                   'These are repository-recipe results, not a reproduction of the paper\'s tuned experiments.',
                   'Original preprocessing retains Iris Id and Breast Cancer id/Unnamed: 32 columns;',
@@ -387,12 +511,25 @@ def report(args):
 
 def suite(args):
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    policy = iteration_settings(load_algorithm_config(args))
+    #Reject incompatible cached artifacts before writing a new protocol or launching jobs.
+    for dataset in DATASETS:
+        paths = [args.output / 'data' / dataset / 'benchmark.json']
+        paths += [args.output / 'runs' / f'{dataset}_{method}.json' for method in ('backprop', 'fbsa')]
+        for path in paths:
+            if path.exists():
+                record = json.loads(path.read_text())
+                if path.name == 'benchmark.json' or record.get('status') == 'completed':
+                    validate_saved_artifact(record, args)
+    training = ('production convergence, selecting minimum full-' +
+                ('training' if policy['trainSetLossOptimisation'] else 'validation') + ' loss'
+                if policy['fbsaOptimiseTrainingIterations'] else 'full configured epochs')
     manifest = {'seed': args.seed, 'datasets': DATASETS, 'methods': ['backprop', 'fbsa'],
                 'raw_data_dir': str(args.raw_data_dir),
                 'threads_per_job': args.threads, 'concurrent_datasets': args.jobs,
-                'source_sha256': {p.name: sha_file(p) for p in (args.output / 'source').glob('*.py')},
-                'protocol': 'Repository defaults; full configured epochs and repeats; paired initial forward weights and minibatch order; all test rows; no validation tuning.',
-                'evaluation_override': 'Disable drop_last and shuffling only for test; aggregate correct predictions over all test rows.',
+                'source_sha256': source_hashes(args), 'training_settings': policy,
+                'protocol': f'Repository defaults; {training}; configured repeats; paired initial forward weights and minibatch order; all test rows; no test-set tuning.',
+                'evaluation_override': 'Evaluate all test rows without shuffling or dropping partial batches; aggregate sample-weighted metrics.',
                 'runner_sha256': sha_file(Path(__file__))}
     atomic_json(args.output / 'protocol.json', manifest)
     def execute(action, dataset, method='backprop'):
@@ -401,6 +538,10 @@ def suite(args):
                    '--dataset', dataset, '--method', method, '--output', str(args.output),
                    '--seed', str(args.seed), '--threads', str(args.threads),
                    '--raw-data-dir', str(args.raw_data_dir)]
+        for option in ('optimise_training_iterations', 'train_set_loss_optimisation'):
+            value = getattr(args, option, None)
+            if value is not None:
+                command.append('--' + ('' if value else 'no-') + option.replace('_', '-'))
         print('START ' + ' '.join(command[3:]), flush=True)
         with log.open('w') as handle:
             result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT)
@@ -421,7 +562,7 @@ def suite(args):
                 continue
             execute('run', dataset, method)
     #Start the largest source while a second worker clears the smaller datasets.
-    order = ['higgs'] + [name for name in DATASETS if name != 'higgs']
+    order = sorted(DATASETS, key=lambda name: name != 'higgs')
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures = {pool.submit(dataset_pair, name): name for name in order}
         for future in as_completed(futures):
@@ -441,6 +582,10 @@ def main():
     parser.add_argument('--threads', type=int, default=2)
     parser.add_argument('--jobs', type=int, default=2)
     parser.add_argument('--retry-failed', action='store_true')
+    parser.add_argument('--optimise-training-iterations', action=argparse.BooleanOptionalAction, default=None,
+                        help='Override fbsaOptimiseTrainingIterations for both methods (default: source setting)')
+    parser.add_argument('--train-set-loss-optimisation', action=argparse.BooleanOptionalAction, default=None,
+                        help='Select training loss; --no-train-set-loss-optimisation selects validation loss (default: source setting)')
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.raw_data_dir = (args.raw_data_dir or args.output / 'raw').resolve()
@@ -457,7 +602,7 @@ def main():
                 if result.exists():
                     previous = json.loads(result.read_text())
                     if args.action == 'prepare' or previous.get('status') == 'completed':
-                        assert previous['seed'] == args.seed, 'Use a separate output directory for a different seed'
+                        validate_saved_artifact(previous, args)
                         print('REUSING ' + str(result), flush=True)
                         return
                 globals()[args.action](args)
@@ -466,9 +611,11 @@ def main():
     except Exception as error:
         traceback.print_exc()
         if args.action == 'run':
-            atomic_json(args.output / 'runs' / f'{args.dataset}_{args.method}.json',
-                        {'dataset': args.dataset, 'method': args.method, 'status': 'failed',
-                         'error': str(error), 'traceback': traceback.format_exc()})
+            path = args.output / 'runs' / f'{args.dataset}_{args.method}.json'
+            #A rejected reuse request must not overwrite a completed result.
+            if not path.exists() or json.loads(path.read_text()).get('status') != 'completed':
+                atomic_json(path, {'dataset': args.dataset, 'method': args.method, 'status': 'failed',
+                                   'error': str(error), 'traceback': traceback.format_exc()})
         raise
 
 

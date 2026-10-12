@@ -78,8 +78,8 @@ No hyperparameters were selected using the benchmark test sets.
 
 Adaptations required to preserve the template and shared ANNpt benchmark
 
-All ANNpt_*.py files are unchanged. The shared architecture, base learning rate,
-batch sizes, datasets, epochs, data loaders and scheduler remain in force.
+With fbsaOptimiseTrainingIterations=False, the shared architecture, base learning
+rate, batch sizes, datasets, epochs, data loaders and scheduler remain in force.
 useFBSA=False retains the existing forward network and standard autograd/Adam
 path through the wrapper, without constructing auxiliary networks.
 
@@ -89,7 +89,7 @@ used for its weight update, including the hidden activation derivative. The
 derivative and lateral activity are evaluated at the actual biased activation.
 Setting biases to zero and freezing them gives numerical parity with the author.
 
-The author's experiment creates fresh optimizers at each epoch. The unchanged
+The author's experiment creates fresh optimizers at each epoch. The fixed-epoch
 ANNpt wrapper creates one optimizer per training run, so its momentum state
 persists across epochs. This adapter therefore matches the local learning rules
 and SGD steps, not the complete upstream experiment's epoch-reset trajectory.
@@ -98,6 +98,45 @@ learning algorithms under the shared repository wrapper.
 
 Create fresh models for this version; old serialized model/optimizer objects
 contain the old configuration and should not be used to resume a 2026 run.
+
+Training iteration optimisation
+
+Set fbsaOptimiseTrainingIterations=True in FBSAANNpt_FBSAANN_globalDefs.py.
+FBSAANNpt_FBSAANN_trainingConvergence.py adapts the controller and evaluator from
+LREANNpt_SUANN_trainingConvergence.py, with the same defaults and fbsa-prefixed
+settings. It is self-contained; no LREANN checkout is required at runtime.
+
+trainSetLossOptimisation=True selects the minimum full-training cross-entropy.
+False selects the minimum full-validation cross-entropy, reusing a supplied
+validation split or holding out fbsaValidationSplitSize (default 20%) of the
+training rows. Splitting precedes preprocessing and repetition; preprocessing is
+fitted on the remaining training rows. The test split never controls selection.
+Image validation uses the deterministic test transform on held-out training
+images; the existing model architecture restrictions still apply.
+
+One iteration is one minibatch update. Evaluation runs at iteration zero and
+every fbsaEvaluateEveryIterations (default 100), including all rows and partial
+batches. Training uses shuffled complete passes without a repeat sampler or
+dropped final batch. Any dataset repetition already applied by the loader remains.
+The selected loss controls both checkpoint selection and patience; exact loss
+ties keep the earlier checkpoint. In training-loss mode, validation is not
+evaluated or required.
+
+This mode replaces trainNumberOfEpochs and the epoch learning-rate scheduler.
+After at least fbsaMinimumTrainingIterations (2000) and one full training pass,
+a plateau of the corresponding fbsaTrainingPatience/fbsaValidationPatience (2000
+iterations) restores the best model AND optimizer state, including FBSA momentum,
+and multiplies the learning rate by 0.2. After three reductions, the next plateau
+stops training. Training-loss mode can also stop at 100% training accuracy with
+loss <= fbsaTrainingLossGoal (0.01). Numerical failures restore the best checkpoint
+at a reduced learning rate, with bounded retries. These are convergence criteria,
+not a guarantee of a global optimum or a fixed maximum iteration count.
+
+The final selected model is restored before saving and testing. Its
+model.fbsaTrainingResult records the selected iteration, total iterations, stop
+reason, selected metrics, policy and learning-rate events. The same path supports
+useFBSA=False with the wrapper's Adam optimizer. benchmark_fbsaann.py uses this
+same production path for both methods when fbsaOptimiseTrainingIterations=True.
 
 Validation
 
@@ -145,3 +184,40 @@ python -B benchmark_fbsaann.py report --output benchmarks/pnas2026-seed42
 The suite uses the existing dataset recipes and downloads/converts HIGGS and
 New Thyroid as before. Pass --raw-data-dir /path/to/existing/raw to reuse those
 downloads. Report generation alone reads saved results; it does not retrain.
+
+Benchmarking convergence
+
+The benchmark follows fbsaOptimiseTrainingIterations and trainSetLossOptimisation
+in its source snapshot. Both options can also be overridden on the command line;
+overrides are applied in memory before the conditional settings are imported.
+For validation-loss convergence, use a fresh output/source snapshot as above and
+replace the suite command with:
+
+python -B benchmark_fbsaann.py suite --output benchmarks/pnas2026-seed42 --optimise-training-iterations --no-train-set-loss-optimisation
+
+For training-loss convergence, use --train-set-loss-optimisation instead.
+--no-optimise-training-iterations selects the original fixed-epoch benchmark.
+Use the same overrides for separate prepare/run commands. The suite forwards
+them automatically to all preparation and training jobs. report reads the saved
+settings, so it needs no mode flags.
+
+Preparation delegates splitting and preprocessing to ANNpt_data. Each pair shares
+the same prepared data, initial forward weights and shuffled minibatch order.
+FBSA and Adam each call ANNpt_main.processDataset with the same convergence
+policy and validation split, and can stop at different iterations. There is no
+separate benchmark training loop or convergence implementation. Test metrics
+come from the selected model through the production full-dataset evaluator.
+
+Run JSON records contain training_convergence (selected iteration, total
+iterations, selected train/validation metrics, stopping reason, learning-rate
+events and policy), plus the effective convergence settings and minibatch hashes
+at each evaluation interval. REPORT.txt lists each method's iteration count,
+selected iteration and stopping reason. Pair verification compares minibatch
+prefixes through the shorter run; fixed-epoch pairs still require equal complete
+schedules and update counts.
+
+Use a separate output directory when changing the source, seed or convergence
+policy. Reusing prepared data or completed runs from a different configuration
+is rejected, preserving the existing results. Raw downloads can still be shared
+with --raw-data-dir. Small offline prepare/run/report regressions are included in
+the unittest command above; they cover both loss modes and fixed-epoch training.

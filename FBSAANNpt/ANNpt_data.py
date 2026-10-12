@@ -57,12 +57,21 @@ _cachedFeatureTypeMap = None
 _cachedClassFieldType = None
 
 
+def trainingIterationsUseValidation():
+	return ((getattr(ANNpt_globalDefs, "populationPertubationOptimiseTrainingIterations", False)
+		or getattr(ANNpt_globalDefs, "fbsaOptimiseTrainingIterations", False))
+		and not ANNpt_globalDefs.trainSetLossOptimisation)
+
+
 def populationValidationIndices(labels):
 	"""Hold out validation before preprocessing or repetition, retaining train classes."""
 	from sklearn.model_selection import train_test_split
 	labels = np.asarray(labels)
 	indices = np.arange(len(labels))
-	options = dict(test_size=populationPertubationValidationSplitSize, random_state=populationPertubationValidationSplitSeed)
+	#Reuse the LREANN split algorithm with the active algorithm's settings.
+	prefix = "fbsa" if getattr(ANNpt_globalDefs, "fbsaOptimiseTrainingIterations", False) else "populationPertubation"
+	options = dict(test_size=getattr(ANNpt_globalDefs, prefix + "ValidationSplitSize"),
+		random_state=getattr(ANNpt_globalDefs, prefix + "ValidationSplitSeed"))
 	try:
 		train, validation = train_test_split(indices, stratify=labels, **options)
 	except ValueError:
@@ -331,8 +340,7 @@ if(useTabularDataset):
 			dataset[datasetSplitNameTrain] = shuffleDataset(dataset[datasetSplitNameTrain])
 			dataset = dataset[datasetSplitNameTrain].train_test_split(test_size=datasetTestSplitSize)
 
-		if(getattr(ANNpt_globalDefs, "populationPertubationOptimiseTrainingIterations", False)
-			and not ANNpt_globalDefs.trainSetLossOptimisation and "validation" not in dataset):
+		if(trainingIterationsUseValidation() and "validation" not in dataset):
 			training = dataset[datasetSplitNameTrain]
 			trainIndices, validationIndices = populationValidationIndices(training[classFieldName])
 			dataset[datasetSplitNameTrain] = training.select(trainIndices)
@@ -821,7 +829,7 @@ elif(useImageDataset):
 			dataset[datasetSplitNameTest] = torchvision.datasets.CIFAR10(root=dataPathName, train=False, download=True, transform=test_transform)
 		else:
 			printe("loadDatasetImage currently requires datasetName==CIFAR10")		
-		if(getattr(ANNpt_globalDefs, "populationPertubationOptimiseTrainingIterations", False) and not ANNpt_globalDefs.trainSetLossOptimisation):
+		if(trainingIterationsUseValidation()):
 			import copy
 			training = dataset[datasetSplitNameTrain]
 			trainIndices, validationIndices = populationValidationIndices(training.targets)
