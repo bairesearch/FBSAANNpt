@@ -2,7 +2,15 @@
 Codex App GPT-6.0:
 
 ---
-Please implement option useAlgorithmFBSAANN:useFBSA=True within FBSAANNpt\_FBSAANN\_globalDefs.py/FBSAANNpt\_FBSAANN.py/FBSAANNpt\_FBSAANNmodel.py
+upgrade your implementation according to the latest PNAS 2006 version; 
+https://chatgpt.com/share/6acc76d0-fb70-83ec-92c5-68ba97993273
+Latest implementation (PNAS 2026):
+- GitHub repository: https://github.com/liaoq/SAM2026
+- Main Python implementation: https://github.com/liaoq/SAM2026/blob/main/run_netv_compare_with_bp.py
+- Earlier 2024/2025 implementation: https://github.com/liaoq/SAM2026/tree/main/code_2025
+
+---
+implement option useAlgorithmFBSAANN:useFBSA=True within FBSAANNpt\_FBSAANN\_globalDefs.py/FBSAANNpt\_FBSAANN.py/FBSAANNpt\_FBSAANNmodel.py
 
 The implementation should follow;
 [https://arxiv.org/abs/2412.20018](https://arxiv.org/abs/2412.20018)

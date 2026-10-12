@@ -164,7 +164,9 @@ def settings(definitions):
              'hiddenLayerSize', 'trainNumberOfEpochs', 'datasetRepeat', 'datasetRepeatSize',
              'datasetHasTestSplit', 'datasetTestSplitSize', 'dataloaderMaintainBatchSize',
              'dataloaderNumWorkers', 'fbsaBackwardWidthMultiplier', 'fbsaLearningRateFactors',
-             'fbsaWeightDecay', 'trainLocal', 'useFBSA']
+             'fbsaWeightDecay', 'fbsaWeightDecayV', 'fbsaWeightDecayVBar', 'fbsaMomentum',
+             'fbsaImplementation', 'fbsaReferenceCommit', 'activationFunctionTypeForward',
+             'activationFunctionTypeBackward', 'trainLocal', 'useFBSA']
     return {name: getattr(definitions, name) for name in names if hasattr(definitions, name)}
 
 
@@ -315,9 +317,10 @@ def run(args):
 def report(args):
     rows = []
     verified = []
+    implementations = set()
     lines = ['FBSA / BACKPROP BENCHMARK', '',
-             'Configured per-dataset architecture, learning rate, repeats and 10 epochs; paired seed 42.',
-             'Backprop: existing Adam optimizer. FBSA: local SAL updates with SGD and configured decay.',
+             'Configured per-dataset architecture, learning rate, repeats and epochs; paired initialization and minibatches.',
+             'Backprop: existing Adam optimizer. FBSA: local SAL updates with SGD; version/settings listed below.',
              'All held-out rows evaluated, including final partial batches. No tuning on the test set.', '',
              'Dataset | Backprop test accuracy (%) | FBSA test accuracy (%) | FBSA minus backprop (pp)']
     for dataset in DATASETS:
@@ -325,6 +328,19 @@ def report(args):
         for method in ['backprop', 'fbsa']:
             path = args.output / 'runs' / f'{dataset}_{method}.json'
             entry[method] = json.loads(path.read_text()) if path.exists() else None
+        if entry['fbsa'] and entry['fbsa'].get('status') == 'completed':
+            config = entry['fbsa']['settings']
+            version = config.get('fbsaImplementation', 'preprint-based SAL (legacy)')
+            decay = config['fbsaWeightDecay']
+            decay_v = config.get('fbsaWeightDecayV')
+            decay_v = decay if decay_v is None else decay_v
+            decay_vbar = config.get('fbsaWeightDecayVBar')
+            decay_vbar = decay_v if decay_vbar is None else decay_vbar
+            implementations.add(
+                f"{version}; reference={config.get('fbsaReferenceCommit', '2024 preprint')}; "
+                f"momentum={config.get('fbsaMomentum', 0.0)}; "
+                f"decay W/Wprime={decay}, V={decay_v}, Vbar={decay_vbar}; "
+                f"gradient factors={json.dumps(config['fbsaLearningRateFactors'], sort_keys=True)}")
         if all(entry[m] and entry[m].get('status') == 'completed' for m in ['backprop', 'fbsa']):
             for key in ['data_fingerprints', 'initial_forward_sha256', 'minibatch_schedule_sha256', 'training_steps', 'source_hashes']:
                 assert entry['backprop'][key] == entry['fbsa'][key], (dataset, key)
@@ -348,6 +364,8 @@ def report(args):
                 return f"{100*item['test_accuracy']:.4f}"
             lines.append(f"{dataset} | {fmt(entry['backprop'])} | {fmt(entry['fbsa'])} | —")
         rows.append(entry)
+    if implementations:
+        lines.extend(['', 'FBSA implementations in completed runs:'] + sorted(implementations))
     lines.extend(['', f'Verified complete paired runs: {len(verified)}/{len(DATASETS)} datasets.',
                   'Checks: identical prepared data, initial forward weights, minibatch sequence and source code;',
                   'configured training-update counts and complete test-set coverage for both methods.', '',

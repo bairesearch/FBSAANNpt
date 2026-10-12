@@ -50,9 +50,13 @@ def createModel(dataset):
 		print("\t trainLocal = ", trainLocal)
 		print("\t useFBSA = ", useFBSA)
 		if(useFBSA):
+			print("\t fbsaImplementation = ", fbsaImplementation)
 			print("\t fbsaBackwardWidthMultiplier = ", fbsaBackwardWidthMultiplier)
 			print("\t fbsaLearningRateFactors = ", fbsaLearningRateFactors)
+			print("\t fbsaMomentum = ", fbsaMomentum)
 			print("\t fbsaWeightDecay = ", fbsaWeightDecay)
+			print("\t fbsaWeightDecayV = ", fbsaWeightDecayV)
+			print("\t fbsaWeightDecayVBar = ", fbsaWeightDecayVBar)
 		print("\t ---")
 		print("\t useImageDataset = ", useImageDataset)
 		if(useImageDataset):
@@ -81,15 +85,26 @@ def createModel(dataset):
 	return model
 
 def createOptimiser(model):
-	"""Apply the local SAL directions with plain SGD, including the shared scheduler.
+	"""PNAS 2026 SGD: local gradient scaling, then family-specific decay/momentum.
 
-	The model supplies analytical local correlations as negative gradients. Adam or
-	momentum would change the paper's plasticity dynamics. Learning-rate factors
-	scale correlations only; weight decay is uniform across all four families.
+	One optimiser is equivalent to the reference's two simultaneous SGD steps.
+	Keep the ANNpt wrapper's optimiser/scheduler lifetime across epochs. Factors
+	belong on gradients, not group learning rates (which would also scale decay).
 	"""
 	if(not model.useFBSA):
 		raise ValueError("The FBSA optimiser requires useFBSA=True")
-	return pt.optim.SGD(model.parameters(), lr=learningRate, weight_decay=model.config.fbsaWeightDecay)
+	config = model.config
+	groups = []
+	for name, layers, decay in (
+		("forward", model.layersLinearF, config.fbsaWeightDecay),
+		("backward", model.layersLinearB, config.fbsaWeightDecay),
+		("lateralForward", model.layersLateralF, config.fbsaWeightDecayV),
+		("lateralBackward", model.layersLateralB, config.fbsaWeightDecayVBar),
+	):
+		parameters = [parameter for parameter in layers.parameters() if parameter.requires_grad]
+		if(parameters):
+			groups.append({"params": parameters, "weight_decay": decay, "name": name})
+	return pt.optim.SGD(groups, lr=learningRate, momentum=config.fbsaMomentum)
 	
 def trainOrTestModel(model, trainOrTest, x, y, optim, l):
 	loss, accuracy = model(trainOrTest, x, y, optim, l)

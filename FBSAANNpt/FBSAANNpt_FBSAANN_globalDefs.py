@@ -32,13 +32,22 @@ else:
 	trainLocal = False	#default: False #disabled for debug/benchmark against standard full layer backprop
 	#standard backprop - backward connections not used
 
-#Self-Assembling Learning (SAL), Liao et al. (2024), equations (2), (5)-(8).
-#These are tunable defaults, not a reproduction of the paper's hyperparameter search.
+#Self-Assembling Learning (SAL/SAM), PNAS 2026, symmetric-V/Vbar update.
+#Reference: liaoq/SAM2026/run_netv_compare_with_bp.py, REPRO defaults and
+#update_layer_gradients_combined_norm_nl (equivalent to "reference" for these settings).
+fbsaImplementation = "SAM2026-symmetric-vv"
+fbsaReferenceCommit = "8597a1c68a832a12a28997aebecc5c369cf7c15b"
 fbsaBackwardWidthMultiplier = 1.0	#hidden feedback width / forward width; input/output widths are unchanged
-fbsaLearningRateFactors = {"forward": 1.0, "backward": 1.0, "lateralForward": 0.1, "lateralBackward": 1.0}
-fbsaWeightDecay = 1e-4	#uniform gamma: delta = learningRate * (factor * correlation - gamma * weight)
+#Mapping to the reference: lr_w, lr_w_prime, lr_v, lr_v_prime.
+fbsaLearningRateFactors = {"forward": 1.0, "backward": 0.2, "lateralForward": 1.0, "lateralBackward": 4.0}
+fbsaMomentum = 0.9
+fbsaWeightDecay = 0.001	#W and Wprime; decay is applied AFTER scaling each local gradient
+fbsaWeightDecayV = None	#None inherits fbsaWeightDecay, as in the reference
+fbsaWeightDecayVBar = None	#None inherits the resolved fbsaWeightDecayV
 #The base learningRate, batch size, architecture and scheduler still come from ANNpt_globalDefs.
-#D_d = I: signed errors propagate linearly; do not apply the forward ReLU derivative.
+#No normalization; identity backward activation. The forward update DOES include
+#the hidden activation derivative; the independent backward pathway does not.
+#See FBSAANNpt_PNAS2026.txt for reference mapping and wrapper/template adaptations.
 activationFunctionTypeBackward = "none"
 
 

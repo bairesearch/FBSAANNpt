@@ -42,6 +42,11 @@ class FBSAANNconfig():
 		self.backwardWidthMultiplier = backwardWidthMultiplier
 		self.fbsaLearningRateFactors = dict(fbsaLearningRateFactors)
 		self.fbsaWeightDecay = fbsaWeightDecay
+		self.fbsaWeightDecayV = fbsaWeightDecay if fbsaWeightDecayV is None else fbsaWeightDecayV
+		self.fbsaWeightDecayVBar = self.fbsaWeightDecayV if fbsaWeightDecayVBar is None else fbsaWeightDecayVBar
+		self.fbsaMomentum = fbsaMomentum
+		self.fbsaImplementation = fbsaImplementation
+		self.fbsaReferenceCommit = fbsaReferenceCommit
 
 class BiasLayer(nn.Module):
 	def __init__(self, num_features):
@@ -120,7 +125,7 @@ class FBSAANNmodel(nn.Module):
 				layersLinearListF.append(linearF)
 		self.layersLinearF = nn.ModuleList(layersLinearListF)
 		self.layersB = nn.ModuleList(layersListB)
-		self.activationF = ANNpt_linearSublayers.generateActivationFunction(activationFunctionTypeForward)
+		self.activationF = ANNpt_linearSublayers.generateActivationFunction(activationFunctionTypeForward) or nn.Identity()
 		#Build the auxiliary circuit after all forward weights, so equal seeds give
 		#identical forward initialisation for SAL and the backprop baseline.
 		self.layersLinearB = nn.ModuleList()
@@ -145,12 +150,18 @@ class FBSAANNmodel(nn.Module):
 			raise ValueError("useFBSA=True supports dense adjacent layers only; disable CNN, skip/residual connections and linear sublayers")
 		if(activationFunctionTypeBackward != "none"):
 			raise ValueError("FBSA implements the paper's identity downstream activation (activationFunctionTypeBackward='none')")
+		if(activationFunctionTypeForward not in ("relu", "sigmoid", "none") or thresholdActivations):
+			raise ValueError("FBSA supports unshifted relu, sigmoid or none forward activation")
+		if(normaliseActivationSparsity):
+			raise ValueError("FBSA uses the SAM2026 configuration without activation normalization")
 		if(not useInbuiltCrossEntropyLossFunction):
 			raise ValueError("FBSA requires cross entropy on output logits")
 		if(not math.isfinite(self.config.backwardWidthMultiplier) or self.config.backwardWidthMultiplier <= 0):
 			raise ValueError("backwardWidthMultiplier must be finite and positive")
-		if(not math.isfinite(self.config.fbsaWeightDecay) or self.config.fbsaWeightDecay < 0):
-			raise ValueError("fbsaWeightDecay must be finite and nonnegative")
+		for name in ("fbsaWeightDecay", "fbsaWeightDecayV", "fbsaWeightDecayVBar", "fbsaMomentum"):
+			value = getattr(self.config, name)
+			if(not math.isfinite(value) or value < 0):
+				raise ValueError(name + " must be finite and nonnegative")
 		for name in ("forward", "backward", "lateralForward", "lateralBackward"):
 			factor = self.config.fbsaLearningRateFactors[name]
 			if(not math.isfinite(factor) or factor < 0):
@@ -159,12 +170,13 @@ class FBSAANNmodel(nn.Module):
 	def generateFBSAnetworks(self):
 		"""Register independently initialised feedback and lateral connections.
 
-		For the edge l1 -> l2, layersLinearF[l2] is W^l1 and
-		layersLinearB[l2] is Wbar^l1. layersLateralF[l1] is V^l1
-		(forward -> backward); layersLateralB[l2] is Vbar^l1
-		(backward -> forward). This destination indexing resolves the shifted
-		Vbar indices in the paper. The output Vbar is a fixed identity boundary,
-		as used in Appendix A; no lateral map is needed below the input.
+		For edge l1 -> l2, with t/s the reference's forward/gradient layers:
+		layersLinearF[l2].weight = t.w.weight, layersLinearB[l2].weight = s.w.weight.T,
+		layersLateralF[l1].weight = t.v.weight, layersLateralB[l2].weight = s.v.weight.T.
+		The transpose lets every map use nn.Linear's conventional forward method.
+		Symmetric-VV describes the learning rules, NOT tied/transpose-tied weights.
+		The output lateral map is identity; input feedback/lateral maps are unused
+		and frozen, matching the reference's first_layer/last_layer exclusions.
 		"""
 		depth = self.config.numberOfLayers
 		self.n_hBackward = [self.n_h[0]] + [max(1, math.ceil(width*self.config.backwardWidthMultiplier)) for width in self.n_h[1:-1]] + [self.n_h[-1]]
@@ -173,12 +185,17 @@ class FBSAANNmodel(nn.Module):
 		for l1 in range(depth):
 			l2 = l1+1
 			self.layersLinearB.append(nn.Linear(self.n_hBackward[l2], self.n_hBackward[l1], bias=False))
+			#Match the reference's initialization fan-in despite transposed storage.
+			nn.init.kaiming_uniform_(self.layersLinearB[l2].weight.T, a=math.sqrt(5))
 			self.layersLateralF.append(nn.Linear(self.n_h[l1], self.n_hBackward[l1], bias=False))
 			if(l2 == depth):
 				self.layersLateralB.append(nn.Identity())
 			else:
 				self.layersLateralB.append(nn.Linear(self.n_hBackward[l2], self.n_h[l2], bias=False))
+				nn.init.kaiming_uniform_(self.layersLateralB[l2].weight.T, a=math.sqrt(5))
 		self.layersLateralF.append(None)
+		self.layersLinearB[1].requires_grad_(False)
+		self.layersLateralF[0].requires_grad_(False)
 
 	def generateLayerSizeList(self):
 		n_h = [None]*(self.config.numberOfLayers+1)
@@ -299,46 +316,53 @@ class FBSAANNmodel(nn.Module):
 		return A, Z
 
 	def neuralNetworkPropagationLayerBackward(self, l2, AprevLayer):
-		#Equation (2), D_d = I. In particular, this is neither W.T nor ReLU(error).
+		#Independent Wprime, identity nonlinearity, no forward-activation gate here.
 		return self.layersLinearB[l2](AprevLayer)
 
 	@pt.no_grad()
 	def updateFBSAweights(self, target, optim):
-		"""Minibatch equations (5)-(8), https://arxiv.org/abs/2412.20018.
+		"""SAM2026 symmetric-VV local rule, no norms, identity backward activation.
 
-		Activities are row vectors here. The output error is the negative CE
-		derivative per example; average outer products exactly once over the batch.
-		Equation (8) uses post-activation h (the appendix pseudocode omits D_u).
-		Biases in the template's forward network act as constant-input synapses.
-		All directions use OLD weights/activities, then one SGD step applies them
-		simultaneously, including uniform decay. No backward()/autograd.grad() call.
+		Matches update_layer_gradients_combined_norm_nl in the pinned reference.
+		The positive mean-CE derivative includes the ONLY batch averaging. Hidden
+		forward updates include the local activation derivative; Vbar correlates
+		post-activation activities with feedback. All gradients use old weights,
+		then SGD applies decay and momentum. Template biases use the same local
+		forward signal, summed over the batch. No backward()/autograd.grad() call.
 		"""
 		optim.zero_grad(set_to_none=True)
 		depth = self.config.numberOfLayers
 		logits = self.Ztrace[depth]
 		batch_size = logits.shape[0]
-		error = -pt.softmax(logits, dim=1)
-		error.scatter_add_(1, target.unsqueeze(1), pt.ones_like(target, dtype=logits.dtype).unsqueeze(1))
+		error = pt.softmax(logits, dim=1)
+		error.scatter_add_(1, target.unsqueeze(1), -pt.ones_like(target, dtype=logits.dtype).unsqueeze(1))
+		error.div_(batch_size)
 		self.AtraceBackward[depth] = error
-		for l2 in range(depth, 0, -1):
+		self.AtraceBackward[0] = None	#no feedback is required below the first hidden layer
+		for l2 in range(depth, 1, -1):
 			self.AtraceBackward[l2-1] = self.neuralNetworkPropagationLayerBackward(l2, self.AtraceBackward[l2])
 
 		factors = self.config.fbsaLearningRateFactors
 		for l2 in range(1, depth+1):
 			l1 = l2-1
 			h1 = self.Atrace[l1]
-			h2 = logits if l2 == depth else self.Atrace[l2]
-			b1 = self.AtraceBackward[l1]
 			b2 = self.AtraceBackward[l2]
 			projectedError = self.layersLateralB[l2](b2)
-			projectedActivity = self.layersLateralF[l1](h1)
-			forwardLayer = self.layersLinearF[l2]
-			forwardLayer.weight.grad = -(factors["forward"]/batch_size) * (projectedError.T @ h1)
-			if(forwardLayer.bias is not None and forwardLayer.bias.requires_grad):
-				forwardLayer.bias.grad = -factors["forward"] * projectedError.mean(dim=0)
-			self.layersLinearB[l2].weight.grad = -(factors["backward"]/batch_size) * (projectedActivity.T @ b2)
-			self.layersLateralF[l1].weight.grad = -(factors["lateralForward"]/batch_size) * (b1.T @ h1)
 			if(l2 < depth):
-				self.layersLateralB[l2].weight.grad = -(factors["lateralBackward"]/batch_size) * (h2.T @ b2)
+				if(isinstance(self.activationF, nn.ReLU)):
+					projectedError = projectedError * (self.Ztrace[l2] > 0)
+				elif(isinstance(self.activationF, nn.Sigmoid)):
+					activity = self.Atrace[l2]
+					projectedError = projectedError * activity * (1-activity)
+			forwardLayer = self.layersLinearF[l2]
+			forwardLayer.weight.grad = factors["forward"] * (projectedError.T @ h1)
+			if(forwardLayer.bias is not None and forwardLayer.bias.requires_grad):
+				forwardLayer.bias.grad = factors["forward"] * projectedError.sum(dim=0)
+			if(l1 > 0):
+				projectedActivity = self.layersLateralF[l1](h1)
+				self.layersLinearB[l2].weight.grad = factors["backward"] * (projectedActivity.T @ b2)
+				self.layersLateralF[l1].weight.grad = factors["lateralForward"] * (self.AtraceBackward[l1].T @ h1)
+			if(l2 < depth):
+				self.layersLateralB[l2].weight.grad = factors["lateralBackward"] * (self.Atrace[l2].T @ b2)
 		optim.step()
 

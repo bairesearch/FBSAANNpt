@@ -1,0 +1,147 @@
+FBSAANN: PNAS 2026 implementation
+
+Reference
+
+The previous repository implementation was an interpretation of the 2024 arXiv
+preprint equations. It was not a port of the author's code_2025 implementation
+or the 2026 code. The current implementation follows the symmetric-VV rule in:
+
+https://github.com/liaoq/SAM2026/blob/8597a1c68a832a12a28997aebecc5c369cf7c15b/run_netv_compare_with_bp.py
+
+Reference commit: 8597a1c68a832a12a28997aebecc5c369cf7c15b
+Reference file SHA256: c2f4cfd7f0de2bb859c052be4fe29043a07550c2f9b742061742ad1d71874dc6
+Functions: update_layer_gradients / update_layer_gradients_combined_norm_nl,
+Net_V.backproj, and build_net_v_sgd_param_groups.
+
+The selected configuration is symmetric_vv=True, forward_norm_type="none",
+backward_norm_type="none", backward_nonlin="identity", backproj_mode="standard",
+with no masks or residuals. The reference and combined update functions agree
+in this configuration. Forward activation defaults to ReLU; sigmoid and identity
+(activationFunctionTypeForward="none") are also supported. Other reference
+experiments, including normalization, nonlinear feedback, masks, convolutional
+motifs and alignment diagnostics, are not implemented by this dense adapter.
+
+Connection mapping
+
+For the edge l1 -> l2, t is the author's forward layer and s its gradient layer:
+
+  Local module                           Author parameter
+  layersLinearF[l2].weight                t.w.weight
+  layersLinearB[l2].weight                s.w.weight.T
+  layersLateralF[l1].weight               t.v.weight
+  layersLateralB[l2].weight               s.v.weight.T
+
+Transposed storage allows the backward maps to use ordinary nn.Linear calls.
+Their initialization uses the author's fan-in convention. All four families are
+independently initialized; "symmetric_vv" does not mean tied weights. Auxiliary
+initialization occurs after the complete forward network, preserving identical
+initial forward weights between FBSA and backprop for the same random seed.
+
+The output lateral map is fixed identity. Input feedback and input lateral
+weights remain registered to retain the template structure, but are frozen and
+excluded from the optimizer, just as the author's first-layer rule leaves their
+gradients unset. No input feedback activity is required.
+
+Update and optimizer
+
+The output feedback signal is (softmax(logits) - one_hot(target)) / batch_size.
+It propagates through the independent backward network without ReLU gating.
+Hidden forward updates project this feedback through the backward-to-forward
+lateral map and multiply by the local forward activation derivative. Output
+forward updates use the CE signal directly. The two lateral updates correlate
+forward activities with backward signals, using post-activation forward
+activities for Vbar. Every gradient uses the old weights and activities before
+one simultaneous SGD step. Batch averaging occurs exactly once, in the output
+signal. FBSA needs neither loss.backward() nor autograd.grad().
+
+Defaults in FBSAANNpt_FBSAANN_globalDefs.py follow the author's REPRO settings:
+
+  fbsaLearningRateFactors["forward"]           lr_w         = 1.0
+  fbsaLearningRateFactors["backward"]          lr_w_prime   = 0.2
+  fbsaLearningRateFactors["lateralForward"]    lr_v         = 1.0
+  fbsaLearningRateFactors["lateralBackward"]   lr_v_prime   = 4.0
+  fbsaMomentum                                             = 0.9
+  fbsaWeightDecay (forward and backward W)                  = 0.001
+  fbsaWeightDecayV                                          = None
+  fbsaWeightDecayVBar                                       = None
+
+None for V decay inherits W decay; None for Vbar decay inherits resolved V
+decay. The config resolves these values at construction. Learning-rate factors
+multiply raw gradients, then SGD adds each family's decay and accumulates
+momentum. They are not optimizer-group learning-rate multipliers. One optimizer
+with four parameter groups is equivalent to the author's two simultaneous SGD
+optimizers. The shared wrapper's scheduler affects all groups.
+
+These are REPRO defaults, not the tuned CIFAR-10 command in the author's README
+(which uses 0.8 for the three auxiliary factors and 0.01 for lateral decay).
+No hyperparameters were selected using the benchmark test sets.
+
+Adaptations required to preserve the template and shared ANNpt benchmark
+
+All ANNpt_*.py files are unchanged. The shared architecture, base learning rate,
+batch sizes, datasets, epochs, data loaders and scheduler remain in force.
+useFBSA=False retains the existing forward network and standard autograd/Adam
+path through the wrapper, without constructing auxiliary networks.
+
+The author's layers have no forward biases. This template retains its biases
+for both methods; FBSA updates each bias using the sum of the same local signal
+used for its weight update, including the hidden activation derivative. The
+derivative and lateral activity are evaluated at the actual biased activation.
+Setting biases to zero and freezing them gives numerical parity with the author.
+
+The author's experiment creates fresh optimizers at each epoch. The unchanged
+ANNpt wrapper creates one optimizer per training run, so its momentum state
+persists across epochs. This adapter therefore matches the local learning rules
+and SGD steps, not the complete upstream experiment's epoch-reset trajectory.
+Reproducing the paper's exact experimental setup is distinct from comparing
+learning algorithms under the shared repository wrapper.
+
+Create fresh models for this version; old serialized model/optimizer objects
+contain the old configuration and should not be used to resume a 2026 run.
+
+Validation
+
+Use the same Python environment as ANNpt_main.py:
+
+  python -B -m unittest discover -s tests -v
+
+To additionally check the actual author code, obtain the pinned source:
+
+  curl -L --fail https://raw.githubusercontent.com/liaoq/SAM2026/8597a1c68a832a12a28997aebecc5c369cf7c15b/run_netv_compare_with_bp.py -o /tmp/sam2026_reference.py
+  SAM2026_REFERENCE=/tmp/sam2026_reference.py python -B -m unittest discover -s tests -v
+
+The parity test verifies the reference file hash and loads only the reviewed
+model/update definitions, without its experiment CLI or dataset code. It checks
+all parameter families and gradients across four SGD steps, distinct decay
+values, momentum, partial/singleton batches, equal and unequal feedback widths,
+and ReLU/sigmoid/identity activations against both author update functions.
+Additional tests cover bias gradients, ReLU gating, batch averaging, frozen
+boundaries, no autograd in FBSA, unchanged baseline gradients, paired forward
+initialization and the shared wrapper's train/test batch paths.
+
+Regenerating the benchmark and REPORT.txt
+
+Old benchmark accuracies describe the previous algorithm. They must be rerun to
+claim PNAS 2026 results. benchmark_fbsaann.py now records the implementation,
+reference commit, momentum, all decay settings and activation settings. Reports
+derive version labels from stored results, identifying old records as legacy.
+
+Use a NEW output directory and source snapshot, so the benchmark does not reuse
+old completed runs or execute their frozen Python files. From this directory:
+
+python - <<'PY'
+from pathlib import Path
+import shutil
+out = Path('benchmarks/pnas2026-seed42')
+out.mkdir(parents=True, exist_ok=False)
+for name in ('source', 'runs', 'logs', 'data'):
+    (out / name).mkdir()
+for path in Path('.').glob('*.py'):
+    shutil.copy2(path, out / 'source' / path.name)
+PY
+python -B benchmark_fbsaann.py suite --output benchmarks/pnas2026-seed42
+python -B benchmark_fbsaann.py report --output benchmarks/pnas2026-seed42
+
+The suite uses the existing dataset recipes and downloads/converts HIGGS and
+New Thyroid as before. Pass --raw-data-dir /path/to/existing/raw to reuse those
+downloads. Report generation alone reads saved results; it does not retrain.
