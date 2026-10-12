@@ -1,2 +1,18 @@
 //FBSAANNpt Specification (prompts):
+Codex App GPT-6.0:
 
+---
+Please implement option useAlgorithmFBSAANN:useFBSA=True within FBSAANNpt\_FBSAANN\_globalDefs.py/FBSAANNpt\_FBSAANN.py/FBSAANNpt\_FBSAANNmodel.py
+
+The implementation should follow;
+[https://arxiv.org/abs/2412.20018](https://arxiv.org/abs/2412.20018)
+Liao, Q., Ziyin, L., Gan, Y., Cheung, B., Harnett, M., & Poggio, T. (2024). Self-assembly of a biologically plausible learning circuit. arXiv preprint arXiv:2412.20018.
+see this Chat conversation for help;
+[https://chatgpt.com/share/6acc41cf-4184-83ec-876f-bddc2db9085c](https://chatgpt.com/share/6acc41cf-4184-83ec-876f-bddc2db9085c)
+
+Note useFBSA=False executes just uses the forward network weights, using a standard backprop algorithm - this should already be implemented (only fix if there is a bug).
+
+Please use the existing FBSAANNpt\_FBSAANNmodel template code provided to define the forward/backward networks; this will need to be extended for your FBSAANN implementation (in particular: the backward and lateral subnetworks, and the connection weight update code have not yet been defined).&#x20;
+
+Exactly the same wrapper code (ANNpt\_\*.py) must be used - this cannot be modified unless a bug is identified. This is important as it enables exact benchmark comparison to other learning algorithms.
+---

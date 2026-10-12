@@ -1,0 +1,34 @@
+FBSA / BACKPROP BENCHMARK
+
+Configured per-dataset architecture, learning rate, repeats and 10 epochs; paired seed 42.
+Backprop: existing Adam optimizer. FBSA: local SAL updates with SGD and configured decay.
+All held-out rows evaluated, including final partial batches. No tuning on the test set.
+
+Dataset | Backprop test accuracy (%) | FBSA test accuracy (%) | FBSA minus backprop (pp)
+iris | 100.0000 | 33.3333 | -66.6667
+new-thyroid | 90.9091 | 59.0909 | -31.8182
+breast-cancer-wisconsin | 92.9825 | 43.8596 | -49.1228
+red-wine | 63.1250 | 48.1250 | -15.0000
+titanic | 73.2824 | 74.0458 | +0.7634
+tabular-benchmark | 65.4995 | 48.6440 | -16.8555
+banking-marketing | 90.9111 | 88.7660 | -2.1451
+adult_income_dataset | 84.8106 | 75.3327 | -9.4780
+diabetes-readmission | 63.1111 | 61.2244 | -1.8867
+blog-feedback | 69.8452 | 70.1863 | +0.3410
+covertype | 92.8230 | 72.1473 | -20.6757
+topquark | 71.5644 | 67.6047 | -3.9597
+higgs | 76.6119 | 63.7524 | -12.8595
+
+Verified complete paired runs: 13/13 datasets.
+Checks: identical prepared data, initial forward weights, minibatch sequence and source code;
+configured training-update counts and complete test-set coverage for both methods.
+
+Interpretation: one paired seed, without hyperparameter tuning or confidence intervals.
+These are repository-recipe results, not a reproduction of the paper's tuned experiments.
+Original preprocessing retains Iris Id and Breast Cancer id/Unnamed: 32 columns;
+Blog Feedback is evaluated as count classification. Small datasets retain configured repetition.
+Top Quark uses the publisher's converted raw Parquet data; all labels were checked against the original files.
+Jobs share one GPU, so recorded elapsed times are not isolated speed measurements.
+
+Artifacts: results.json (full metrics), protocol.json (source hashes and execution policy),
+environment.json, topquark_source_audit.json, data/*/benchmark.json and logs/*.log.
