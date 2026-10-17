@@ -5,6 +5,8 @@ Dataset and algorithm switches are evaluated in memory; repository wrappers are
 never edited. Train with configured epochs or the production FBSA convergence
 controller, for both FBSA and backprop. Test uses every
 held-out row and reports sample-weighted accuracy, not an average of batches.
+Training and evaluation use DATASET_BATCH_SIZES. The initial learning rate
+defaults to the dataset setting and can be overridden with --learning-rate.
 Preparation downloads the UCI HIGGS and New Thyroid inputs and prepends their
 CSV headers under OUTPUT/raw (or --raw-data-dir), reusing completed files.
 """
@@ -13,6 +15,7 @@ import gzip
 import hashlib
 import importlib
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -28,6 +31,21 @@ from urllib.request import urlopen
 DATASETS = ['iris', 'new-thyroid', 'breast-cancer-wisconsin', 'red-wine', 'titanic',
             'tabular-benchmark', 'banking-marketing', 'adult_income_dataset',
             'diabetes-readmission', 'blog-feedback', 'covertype', 'topquark', 'higgs']
+DATASET_BATCH_SIZES = {
+    'iris': 128,
+    'new-thyroid': 128,
+    'breast-cancer-wisconsin': 128,
+    'red-wine': 128,
+    'titanic': 128,
+    'tabular-benchmark': 128,
+    'banking-marketing': 128,
+    'adult_income_dataset': 128,
+    'diabetes-readmission': 128,
+    'blog-feedback': 128,
+    'covertype': 128,	#1024
+    'topquark': 128,	#1024
+    'higgs': 8192,
+}
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = ROOT / 'benchmarks/2026-10-12-seed42'
 CONVERGENCE_SETTINGS = [
@@ -165,13 +183,52 @@ def source_hashes(args):
     return {p.name: sha_file(p) for p in (args.output / 'source').glob('*.py')}
 
 
-def validate_saved_artifact(record, args):
-    """A new loss mode needs freshly prepared data and independently saved runs."""
+def preparation_source_hashes(hashes):
+    #loadDataset() and its settings determine the saved rows, splits and transforms.
+    #Model, optimiser and convergence-loop changes do not require preparing again.
+    return {name: hashes[name] for name in (
+        'ANNpt_data.py', 'ANNpt_globalDefs.py', 'FBSAANNpt_FBSAANN_globalDefs.py')}
+
+
+def positive_learning_rate(value):
+    rate = float(value)
+    if not math.isfinite(rate) or rate <= 0:
+        raise argparse.ArgumentTypeError('learning rate must be finite and greater than zero')
+    return rate
+
+
+def validate_saved_artifact(record, args, *, prepared_data=False):
+    """Check preprocessing sources for data, and the full snapshot for trained runs."""
     expected = iteration_settings(load_algorithm_config(args))
-    if (record['seed'] != args.seed or record['source_hashes'] != source_hashes(args)
-            or iteration_settings(record['settings']) != expected):
-        raise ValueError('Saved data/run uses a different seed, source snapshot or convergence policy; '
-                         'use a separate output directory')
+    expected_batch_size = DATASET_BATCH_SIZES.get(record['dataset'])
+    saved_sources, current_sources = record['source_hashes'], source_hashes(args)
+    if prepared_data:
+        saved_sources = preparation_source_hashes(saved_sources)
+        current_sources = preparation_source_hashes(current_sources)
+    differences = []
+    if record['seed'] != args.seed:
+        differences.append(f"seed ({record['seed']} != {args.seed})")
+    changed_sources = sorted(name for name in saved_sources.keys() | current_sources.keys()
+                             if saved_sources.get(name) != current_sources.get(name))
+    if changed_sources:
+        differences.append('source snapshot (' + ', '.join(changed_sources) + ')')
+    if iteration_settings(record['settings']) != expected:
+        differences.append('convergence policy')
+    #Prepared rows are independent of minibatch size; completed runs are not.
+    if not prepared_data and expected_batch_size is not None and record['settings']['batchSize'] != expected_batch_size:
+        differences.append(f"batch size ({record['settings']['batchSize']} != {expected_batch_size})")
+    #An optimiser setting does not change prepared rows. A completed run must
+    #match an explicit override, and a previous override must not become a default.
+    if not prepared_data:
+        requested_rate = getattr(args, 'learning_rate', None)
+        if requested_rate is not None and record['settings']['learningRate'] != requested_rate:
+            differences.append(f"learning rate ({record['settings']['learningRate']} != {requested_rate})")
+        elif requested_rate is None and record.get('learning_rate_override') is not None:
+            differences.append(f"learning rate override ({record['learning_rate_override']} saved; none requested)")
+    if differences:
+        kind = 'prepared data' if prepared_data else 'run'
+        raise ValueError(f"Saved {kind} is incompatible: " + '; '.join(differences) +
+                         '; use a separate output directory')
 
 
 def setup(args):
@@ -196,6 +253,10 @@ def setup(args):
     text, count = re.subn(r"(?m)^\tdatasetName = 'titanic'.*$", '\tdatasetName = ' + repr(args.dataset), text)
     assert count == 1
     exec(compile(text, str(source / 'ANNpt_globalDefs.py'), 'exec'), vars(definitions))
+    #Apply before importing the wrapper/model/data modules, which copy global settings.
+    definitions.batchSize = DATASET_BATCH_SIZES.get(args.dataset, definitions.batchSize)
+    if getattr(args, 'learning_rate', None) is not None:
+        definitions.learningRate = positive_learning_rate(args.learning_rate)
     definitions.dataPathName = str(args.raw_data_dir)
     definitions.modelPathNameFull = str(args.output / 'runs' / f'{args.dataset}_{args.method}.pt')
     definitions.saveModelTrainContinuous = False
@@ -296,7 +357,8 @@ def run(args):
     from datasets import load_from_disk
     data_path = args.output / 'data' / args.dataset
     info = json.loads((data_path / 'benchmark.json').read_text())
-    validate_saved_artifact(info, args)
+    validate_saved_artifact(info, args, prepared_data=True)
+    run_source_hashes = source_hashes(args)
     dataset = load_from_disk(str(data_path))
     data_module = wrapper.ANNpt_data
     data_module._cachedFeatureTypeList = info['field_types'][:-1]
@@ -370,7 +432,9 @@ def run(args):
               'test_seconds': time.time() - trained, 'settings': settings(definitions),
               'data_fingerprints': info['fingerprints'], 'initial_forward_sha256': initial_hash,
               'minibatch_schedule_sha256': schedule.hexdigest(), 'device': str(definitions.device),
-              'torch_version': torch.__version__, 'source_hashes': info['source_hashes']}
+              'torch_version': torch.__version__, 'source_hashes': run_source_hashes,
+              'data_source_hashes': info['source_hashes'],
+              'learning_rate_override': getattr(args, 'learning_rate', None)}
     if optimise:
         result['training_convergence'] = convergence_result
         result['minibatch_schedule_checkpoints'] = schedule_checkpoints
@@ -388,12 +452,14 @@ def verify_pair(dataset, entry, info):
         assert backprop[key] == fbsa[key], (dataset, key)
     policy = iteration_settings(backprop['settings'])
     assert policy == iteration_settings(fbsa['settings']) == iteration_settings(info['settings']), dataset
+    assert backprop['settings']['batchSize'] == fbsa['settings']['batchSize'], dataset
     optimise = policy['fbsaOptimiseTrainingIterations']
     for result in (backprop, fbsa):
         config = result['settings']
         assert result['seed'] == info['seed'], dataset
         assert result['test_rows_evaluated'] == info['sizes']['test'], dataset
-        assert result['source_hashes'] == info['source_hashes'], dataset
+        assert preparation_source_hashes(result['source_hashes']) == preparation_source_hashes(info['source_hashes']), dataset
+        assert result.get('data_source_hashes', result['source_hashes']) == info['source_hashes'], dataset
         assert result['data_fingerprints'] == info['fingerprints'], dataset
         batches, remainder = divmod(info['sizes']['train'], config['batchSize'])
         if remainder and (optimise or not config['dataloaderMaintainBatchSize']):
@@ -407,9 +473,11 @@ def verify_pair(dataset, entry, info):
             assert 0 <= selected['selected_iteration'] <= selected['iterations'], dataset
             assert selected['selected_iteration'] % policy['fbsaEvaluateEveryIterations'] == 0, dataset
             assert selected['policy']['selection_metric'] == split + '_loss', dataset
-            assert selected['train']['rows'] == info['sizes']['train'], dataset
+            assert selected[split]['rows'] == info['sizes'][split], dataset
             if split == 'validation':
-                assert selected['validation']['rows'] == info['sizes']['validation'], dataset
+                #Older runs also recorded diagnostic train metrics; new runs leave them null.
+                if selected['train'] is not None:
+                    assert selected['train']['rows'] == info['sizes']['train'], dataset
             else:
                 assert selected['validation'] is None, dataset
             if selected['stop_reason'] == 'perfect_train_fit':
@@ -437,6 +505,7 @@ def report(args):
     verified = []
     implementations = set()
     iteration_rows = []
+    learning_rate_overrides = []
     lines = ['FBSA / BACKPROP BENCHMARK', '',
              'Configured per-dataset architecture, learning rate and repeats; paired initialization and minibatch order.',
              'Training uses configured epochs or the production convergence controller; selection details below.',
@@ -450,6 +519,8 @@ def report(args):
             entry[method] = json.loads(path.read_text()) if path.exists() else None
             result = entry[method]
             if result and result.get('status') == 'completed':
+                if result.get('learning_rate_override') is not None:
+                    learning_rate_overrides.append(f"{dataset} | {method} | {result['settings']['learningRate']}")
                 if result['settings'].get('fbsaOptimiseTrainingIterations', False):
                     selected = result['training_convergence']
                     mode = selected['policy']['selection_metric']
@@ -485,6 +556,9 @@ def report(args):
         rows.append(entry)
     if implementations:
         lines.extend(['', 'FBSA implementations in completed runs:'] + sorted(implementations))
+    if learning_rate_overrides:
+        lines.extend(['', 'Initial learning-rate overrides:',
+                      'Dataset | Method | Initial learning rate'] + learning_rate_overrides)
     if iteration_rows:
         lines.extend(['', 'Training iteration selection:',
                       'Dataset | Method | Selection | Total iterations | Selected iteration | Stop reason'] + iteration_rows)
@@ -493,7 +567,7 @@ def report(args):
                   'matching minibatch prefixes through the shorter run, and complete test-set coverage.',
                   'Fixed-epoch pairs also require identical update counts and complete minibatch schedules.',
                   'Convergence pairs may stop independently; selected iterations and stop reasons are checked.', '',
-                  'Interpretation: one paired seed, without hyperparameter tuning or confidence intervals.',
+                  'Interpretation: one paired seed, without confidence intervals; learning-rate overrides are listed above when used.',
                   'These are repository-recipe results, not a reproduction of the paper\'s tuned experiments.',
                   'Original preprocessing retains Iris Id and Breast Cancer id/Unnamed: 32 columns;',
                   'Blog Feedback is evaluated as count classification. Small datasets retain configured repetition.',
@@ -520,11 +594,13 @@ def suite(args):
             if path.exists():
                 record = json.loads(path.read_text())
                 if path.name == 'benchmark.json' or record.get('status') == 'completed':
-                    validate_saved_artifact(record, args)
+                    validate_saved_artifact(record, args, prepared_data=path.name == 'benchmark.json')
     training = ('production convergence, selecting minimum full-' +
                 ('training' if policy['trainSetLossOptimisation'] else 'validation') + ' loss'
                 if policy['fbsaOptimiseTrainingIterations'] else 'full configured epochs')
     manifest = {'seed': args.seed, 'datasets': DATASETS, 'methods': ['backprop', 'fbsa'],
+                'batch_size_overrides': DATASET_BATCH_SIZES,
+                'learning_rate_override': getattr(args, 'learning_rate', None),
                 'raw_data_dir': str(args.raw_data_dir),
                 'threads_per_job': args.threads, 'concurrent_datasets': args.jobs,
                 'source_sha256': source_hashes(args), 'training_settings': policy,
@@ -542,6 +618,8 @@ def suite(args):
             value = getattr(args, option, None)
             if value is not None:
                 command.append('--' + ('' if value else 'no-') + option.replace('_', '-'))
+        if getattr(args, 'learning_rate', None) is not None:
+            command.extend(['--learning-rate', str(args.learning_rate)])
         print('START ' + ' '.join(command[3:]), flush=True)
         with log.open('w') as handle:
             result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT)
@@ -580,6 +658,8 @@ def main():
                         help='Download/reuse HIGGS and New Thyroid files here (default: OUTPUT/raw)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--threads', type=int, default=2)
+    parser.add_argument('--learning-rate', type=positive_learning_rate,
+                        help='Override the initial learning rate for this run (both methods in suite); default: dataset setting')
     parser.add_argument('--jobs', type=int, default=2)
     parser.add_argument('--retry-failed', action='store_true')
     parser.add_argument('--optimise-training-iterations', action=argparse.BooleanOptionalAction, default=None,
@@ -602,7 +682,7 @@ def main():
                 if result.exists():
                     previous = json.loads(result.read_text())
                     if args.action == 'prepare' or previous.get('status') == 'completed':
-                        validate_saved_artifact(previous, args)
+                        validate_saved_artifact(previous, args, prepared_data=args.action == 'prepare')
                         print('REUSING ' + str(result), flush=True)
                         return
                 globals()[args.action](args)

@@ -2,6 +2,15 @@
 Codex App GPT-6.0:
 
 ---
+update the benchmark script to support independent dataset batch sizes (DATASET_BATCH_SIZES).
+set benchmark batchsize higgs=8192 (instead of 128).
+update the benchmark script to support existing raw data folder (raw-data-dir).
+patch benchmark script to print correct labels (backprop/fbsa).
+optimise the fbsaOptimiseTrainingIterations convergence loaders to use batched data loading and the configured workers, for both backprop and FBSA.
+patch option trainSetLossOptimisation=False - as per the specification, when trainSetLossOptimisation = False use validation set for training iterations optimisation only.
+update the benchmark with an optional learning-rate flag.
+
+---
 upgrade the FBSAANN code to support option fbsaOptimiseTrainingIterations=True (based on LREANNpt option populationPertubationOptimiseTrainingIterations). Ensure to support both trainSetLossOptimisation = True and False (ie use validation set for training iterations optimisation).
 	see the LREANNpt repo code for reference
 	Please try and use the same LREANNpt populationPertubationOptimiseTrainingIterations code if possible.

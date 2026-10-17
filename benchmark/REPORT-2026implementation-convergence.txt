@@ -1,3 +1,4 @@
+all datasets:
 benchmark_output=../../benchmarks/REPORT-2026implementation-convergence-seed42
 mkdir -p "$benchmark_output"/{source,data,runs,logs}
 cp ANNpt_*.py FBSAANNpt_FBSAANN*.py "$benchmark_output/source/"
@@ -8,3 +9,93 @@ python -B benchmark_fbsaann.py suite \
   --jobs 2 \
   --optimise-training-iterations \
   --no-train-set-loss-optimisation
+
+higgs dataset only:
+previous=../../benchmarks/REPORT-2026implementation-convergence-seed42
+benchmark_output=../../benchmarks/REPORT-2026implementation-convergence-higgs-batch4096-seed42
+mkdir -p "$benchmark_output"/{source,data,runs,logs}
+cp ANNpt_*.py FBSAANNpt_FBSAANN*.py "$benchmark_output/source/"
+cp -a --reflink=auto "$previous/data/higgs" "$benchmark_output/data/"
+benchmark_args=(
+  --output "$benchmark_output"
+  --dataset higgs
+  --seed 42
+  --threads 2
+  --raw-data-dir "$previous/raw"
+  --optimise-training-iterations
+  --no-train-set-loss-optimisation
+)
+python -B benchmark_fbsaann.py run "${benchmark_args[@]}" --method backprop
+python -B benchmark_fbsaann.py run "${benchmark_args[@]}" --method fbsa
+	python -B benchmark_fbsaann.py run "${benchmark_args[@]}" --method fbsa --learning-rate 0.01
+
+---
+
+FBSA / BACKPROP BENCHMARK
+
+Configured per-dataset architecture, learning rate and repeats; paired initialization and minibatch order.
+Training uses configured epochs or the production convergence controller; selection details below.
+Backprop: existing Adam optimizer. FBSA: local SAL updates with SGD; version/settings listed below.
+All held-out rows evaluated, including final partial batches. No tuning on the test set.
+
+Dataset | Backprop test accuracy (%) | FBSA test accuracy (%) | FBSA minus backprop (pp)
+iris | 100.0000 | 100.0000 | +0.0000
+new-thyroid | 90.9091 | 100.0000 | +9.0909
+breast-cancer-wisconsin | 92.9825 | 96.4912 | +3.5088
+red-wine | 59.3750 | 56.2500 | -3.1250
+titanic | 77.0992 | 74.8092 | -2.2901
+tabular-benchmark | 65.1562 | 52.3859 | -12.7703
+banking-marketing | 91.1544 | 89.7612 | -1.3932
+adult_income_dataset | 84.9744 | 84.0532 | -0.9212
+diabetes-readmission | 63.4894 | 62.3151 | -1.1743
+blog-feedback | 69.8059 | 70.2387 | +0.4328
+covertype | 95.9468 | 71.8426 | -24.1042
+topquark | 71.7198 | 71.1505 | -0.5693
+higgs | 77.3812 | 53.0235 | -24.3576
+	higgs | 77.3812 | 61.1155 | -16.2656
+	
+FBSA implementations in completed runs:
+SAM2026-symmetric-vv; reference=8597a1c68a832a12a28997aebecc5c369cf7c15b; momentum=0.9; decay W/Wprime=0.001, V=0.001, Vbar=0.001; gradient factors={"backward": 0.2, "forward": 1.0, "lateralBackward": 4.0, "lateralForward": 1.0}
+
+Training iteration selection:
+Dataset | Method | Selection | Total iterations | Selected iteration | Stop reason
+iris | backprop | validation_loss | 20800 | 16300 | validation_loss_plateau_after_lr_reductions
+iris | fbsa | validation_loss | 13800 | 5800 | validation_loss_plateau_after_lr_reductions
+new-thyroid | backprop | validation_loss | 8700 | 700 | validation_loss_plateau_after_lr_reductions
+new-thyroid | fbsa | validation_loss | 11600 | 3600 | validation_loss_plateau_after_lr_reductions
+breast-cancer-wisconsin | backprop | validation_loss | 9200 | 1200 | validation_loss_plateau_after_lr_reductions
+breast-cancer-wisconsin | fbsa | validation_loss | 32500 | 24500 | validation_loss_plateau_after_lr_reductions
+red-wine | backprop | validation_loss | 8900 | 2900 | validation_loss_plateau_after_lr_reductions
+red-wine | fbsa | validation_loss | 35800 | 28100 | validation_loss_plateau_after_lr_reductions
+titanic | backprop | validation_loss | 8400 | 400 | validation_loss_plateau_after_lr_reductions
+titanic | fbsa | validation_loss | 15400 | 13500 | validation_loss_plateau_after_lr_reductions
+tabular-benchmark | backprop | validation_loss | 12300 | 8400 | validation_loss_plateau_after_lr_reductions
+tabular-benchmark | fbsa | validation_loss | 8300 | 8300 | validation_loss_plateau_after_lr_reductions
+banking-marketing | backprop | validation_loss | 12500 | 6500 | validation_loss_plateau_after_lr_reductions
+banking-marketing | fbsa | validation_loss | 86200 | 84400 | validation_loss_plateau_after_lr_reductions
+adult_income_dataset | backprop | validation_loss | 10800 | 4900 | validation_loss_plateau_after_lr_reductions
+adult_income_dataset | fbsa | validation_loss | 59100 | 54500 | validation_loss_plateau_after_lr_reductions
+diabetes-readmission | backprop | validation_loss | 11300 | 9600 | validation_loss_plateau_after_lr_reductions
+diabetes-readmission | fbsa | validation_loss | 23200 | 22600 | validation_loss_plateau_after_lr_reductions
+blog-feedback | backprop | validation_loss | 10100 | 8400 | validation_loss_plateau_after_lr_reductions
+blog-feedback | fbsa | validation_loss | 30600 | 30200 | validation_loss_plateau_after_lr_reductions
+covertype | backprop | validation_loss | 54300 | 52600 | validation_loss_plateau_after_lr_reductions
+covertype | fbsa | validation_loss | 68700 | 68600 | validation_loss_plateau_after_lr_reductions
+topquark | backprop | validation_loss | 17300 | 16700 | validation_loss_plateau_after_lr_reductions
+topquark | fbsa | validation_loss | 37700 | 37400 | validation_loss_plateau_after_lr_reductions
+
+Verified complete paired runs: 12/13 datasets.
+Checks: identical prepared data, initial forward weights, source code and selection policy;
+matching minibatch prefixes through the shorter run, and complete test-set coverage.
+Fixed-epoch pairs also require identical update counts and complete minibatch schedules.
+Convergence pairs may stop independently; selected iterations and stop reasons are checked.
+
+Interpretation: one paired seed, without hyperparameter tuning or confidence intervals.
+These are repository-recipe results, not a reproduction of the paper's tuned experiments.
+Original preprocessing retains Iris Id and Breast Cancer id/Unnamed: 32 columns;
+Blog Feedback is evaluated as count classification. Small datasets retain configured repetition.
+Top Quark uses the publisher's converted raw Parquet data; all labels were checked against the original files.
+Jobs share one GPU, so recorded elapsed times are not isolated speed measurements.
+
+Artifacts: results.json (full metrics), protocol.json (source hashes and execution policy),
+environment.json, topquark_source_audit.json, data/*/benchmark.json and logs/*.log.
